@@ -1,0 +1,169 @@
+{
+  "name": "ATS Resume Screener v3",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ats/v1/resume-upload",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryPropertyName": "data"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "id": "webhook_1",
+      "name": "1. Receive Resume"
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [260, 0],
+      "id": "extract_pdf",
+      "name": "2. Extract PDF Text"
+    },
+    {
+      "parameters": {
+        "jsCode": "function uuidv4(){return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16);});}\n\nconst body = $node['1. Receive Resume'].json.body || {};\nconst binary = $input.item.binary?.data;\n\nconst escape = (s='')=>s.replace(/\\s+/g,' ').trim().replace(/'/g,\"''\");\n\nreturn [{json:{\n  applicationId: uuidv4(),\n  fileName: binary?.fileName || 'resume.pdf',\n  resumeText: escape($json.text),\n  jobDescription: escape(body.job_description),\n  candidateEmail: escape(body.email),\n  jobId: escape(body.jobId || 'DEFAULT'),\n  receivedAt: new Date().toISOString()\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0],
+      "id": "prepare_data",
+      "name": "3. Prepare Data"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO applications (application_id,candidate_email,candidate_name,job_id,status,resume_text,job_description,created_at)\nVALUES ('{{ $json.applicationId }}','{{ $json.candidateEmail }}','Unknown','{{ $json.jobId }}','PENDING','{{ $json.resumeText }}','{{ $json.jobDescription }}',NOW())\nRETURNING application_id;"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [760, 0],
+      "id": "insert_db",
+      "name": "Insert Application"
+    },
+    {
+      "parameters": {
+        "jsCode": "const r=$input.first().json;\nconst p=$node['3. Prepare Data'].json;\n\nreturn [{json:{\n  applicationId: r?.[0]?.application_id || p.applicationId,\n  fileName: p.fileName,\n  resumeText: p.resumeText,\n  jobDescription: p.jobDescription,\n  candidateEmail: p.candidateEmail,\n  jobId: p.jobId,\n  receivedAt: p.receivedAt\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [980, 0],
+      "id": "merge_data",
+      "name": "Merge Data"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_GROQ_API_KEY"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "jsonBody": "={\"model\":\"llama-3.1-8b-instant\",\"messages\":[{\"role\":\"system\",\"content\":\"Return ONLY JSON.\"},{\"role\":\"user\",\"content\":\"Job:\\n{{$json.jobDescription}}\\n\\nResume:\\n{{$json.resumeText}}\\n\\nReturn JSON: candidate_name,score,skills_matched,missing_skills,experience_years,education,recommendation\"}],\"temperature\":0.1}"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1220, 0],
+      "id": "groq_ai",
+      "name": "AI Screening"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw=$json;\nlet data;\ntry{\n  let c=raw.choices?.[0]?.message?.content||'';\n  c=c.replace(/```json|```/g,'').trim();\n  const m=c.match(/\\{[\\s\\S]*\\}/);\n  data=JSON.parse(m?m[0]:c);\n}catch(e){\n  data={candidate_name:'Error',score:0,skills_matched:[],missing_skills:[],experience_years:0,education:'Unknown',recommendation:e.message};\n}\n\nconst id=$node['Merge Data'].json.applicationId;\nconst score=Math.max(0,Math.min(100,data.score||0));\nconst status=score>=70?'SHORTLISTED':score>=50?'REVIEW':'REJECTED';\n\nreturn [{json:{\n  applicationId:id,\n  candidateName:data.candidate_name,\n  score,\n  skillsMatched:(data.skills_matched||[]).join(','),\n  missingSkills:(data.missing_skills||[]).join(','),\n  experienceYears:data.experience_years||0,\n  education:data.education||'Unknown',\n  recommendation:data.recommendation||'',\n  status,\n  processedAt:new Date().toISOString()\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1460, 0],
+      "id": "process_results",
+      "name": "Process Results"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE applications SET status='{{ $json.status }}', match_score={{ $json.score }}, candidate_name='{{ $json.candidateName }}', skills_matched=string_to_array('{{ $json.skillsMatched }}',','), missing_skills=string_to_array('{{ $json.missingSkills }}',','), experience_years={{ $json.experienceYears }}, education='{{ $json.education }}', recommendation='{{ $json.recommendation }}', processed_at=NOW()\nWHERE application_id='{{ $json.applicationId }}'\nRETURNING *;"
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [1700, 0],
+      "id": "update_db",
+      "name": "Update Application"
+    },
+    {
+      "parameters": {
+        "jsCode": "const d=$json;\nreturn [{json:{reportText:`ATS REPORT\\n\\nCandidate: ${d.candidate_name}\\nScore: ${d.score}\\nStatus: ${d.status}\\nExperience: ${d.experience_years}\\nEducation: ${d.education}\\nRecommendation: ${d.recommendation}`}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1940, 0],
+      "id": "report",
+      "name": "Generate Report"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "reportText",
+        "binaryPropertyName": "report"
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [2180, 0],
+      "id": "file",
+      "name": "Convert To File"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.reportText }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/plain"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [2420, 0],
+      "id": "response",
+      "name": "Response"
+    }
+  ],
+  "connections": {
+    "1. Receive Resume": { "main": [[{ "node": "2. Extract PDF Text", "type": "main", "index": 0 }]] },
+    "2. Extract PDF Text": { "main": [[{ "node": "3. Prepare Data", "type": "main", "index": 0 }]] },
+    "3. Prepare Data": { "main": [[{ "node": "Insert Application", "type": "main", "index": 0 }]] },
+    "Insert Application": { "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]] },
+    "Merge Data": { "main": [[{ "node": "AI Screening", "type": "main", "index": 0 }]] },
+    "AI Screening": { "main": [[{ "node": "Process Results", "type": "main", "index": 0 }]] },
+    "Process Results": { "main": [[{ "node": "Update Application", "type": "main", "index": 0 }]] },
+    "Update Application": { "main": [[{ "node": "Generate Report", "type": "main", "index": 0 }]] },
+    "Generate Report": { "main": [[{ "node": "Convert To File", "type": "main", "index": 0 }]] },
+    "Convert To File": { "main": [[{ "node": "Response", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,487 @@
+{
+  "name": "n8ndatabase Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "db-assistant",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "0c9017ac-7db2-4ac7-aa57-edb1465858b5",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -688,
+        144
+      ],
+      "webhookId": "db-assistant"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst question = (body.question || '').trim();\nif (!question) throw new Error('No question provided');\n\nconst q = question.toLowerCase();\n\nconst negationWords = [\n  \"don't\", \"dont\", \"do not\", \"doesn't\", \"doesnt\", \"does not\",\n  \"never\", \"without\", \"skip\", \"avoid\", \"stop\", \"cancel\",\n  \"no need for\", \"no need to\", \"not\", \"no\"\n];\n\nconst reportWords = [\n  \"report\", \"summary\", \"overview\", \"breakdown\",\n  \"weekly\", \"monthly\", \"last week\", \"past week\",\n  \"7 days\", \"one week\",\n  \"last month\", \"past month\",\n  \"30 days\", \"one month\"\n];\n\nconst esc = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\nconst negPattern = negationWords.map(esc).join('|');\nconst trigPattern = reportWords.map(esc).join('|');\n\n// Does the question contain any report-style trigger word at all?\nconst trigRegex = new RegExp(`\\\\b(${trigPattern})\\\\b`, 'i');\nconst wantsReport = trigRegex.test(q);\n\n// Negation near a trigger word, in either direction\nconst negBefore = new RegExp(`\\\\b(${negPattern})\\\\b(\\\\s+\\\\S+){0,5}\\\\s*\\\\b(${trigPattern})\\\\b`, 'i');\nconst negAfter = new RegExp(`\\\\b(${trigPattern})\\\\b(\\\\s+\\\\S+){0,4}\\\\s*\\\\b(${negPattern})\\\\b`, 'i');\nconst negated = negBefore.test(q) || negAfter.test(q);\n\n// Final decision: only a report if it explicitly wants one AND isn't negated\nconst is_report = wantsReport && !negated;\n\n// Day-range extraction (only meaningful for reports)\nlet days = null;\nconst match = q.match(/(\\d+)\\s*(day|days)/i);\nif (match) {\n  days = parseInt(match[1], 10);\n}\nif (!days) {\n  if (q.includes('week')) days = 7;\n  else if (q.includes('month')) days = 30;\n  else if (q.includes('today')) days = 1;\n  else if (q.includes('tomorrow')) days = 2;\n}\nif (!days) days = 10;\n\nlet report_type = null;\nif (is_report) {\n  report_type = q.includes('expir') ? 'expiry_report' : 'general_report';\n}\n\nlet date_context = '';\nif (report_type === 'expiry_report') {\n  date_context = `expiry_date <= CURRENT_DATE + INTERVAL '${days} day'`;\n}\n\nreturn [{\n  json: {\n    question,\n    report_type,\n    days,\n    is_report,\n    negated,\n    date_context,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "5161dc4e-c710-4123-b307-59d2cdf22acc",
+      "name": "Parse & Classify Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -464,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "8e9cd304-3528-40b3-84e7-79b2f0d8655c",
+                    "leftValue": "={{$json.is_report}}",
+                    "rightValue": "={{$json.is_report}}",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "9c824a9d-116d-4df2-8433-ca73e33aa595",
+                    "leftValue": "={{$json.is_report}}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "false",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a2f3161c-0f2f-4dd9-a320-8b7daafb14ae",
+      "name": "Route: Report or QA",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -240,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"max_tokens\": 500,\n  \"temperature\": 0,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a PostgreSQL expert. You ONLY return valid PostgreSQL SELECT queries. No explanations. No markdown. No comments. ONLY raw SQL.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Generate a PostgreSQL SELECT query for this request.\\n\\nQuestion: {{$json.question}}\\n\\nDATABASE SCHEMA:\\nTable: medicines\\nColumns: id, name, company, expiry_date, stock_left, price, created_at\\n\\nRULES:\\n1. Use ONLY the medicines table and ONLY the listed columns.\\n2. NEVER invent tables or columns.\\n3. ONLY SELECT queries, no markdown, no explanation, no comments.\\n4. Use clear column aliases for computed/aggregate values.\\n5. ORDER BY a sensible column where it makes the result more useful (e.g. ORDER BY stock_left ASC for low-stock reports, ORDER BY expiry_date ASC for expiry reports, ORDER BY price DESC for price reports).\\n6. If the question cannot be answered with this schema, return: SELECT 'NO_DATA' AS result;\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "f4060de3-0469-47eb-ad61-de0e5fb4f31d",
+      "name": "Groq: Report SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2v5VQZ8KJ8DUVScE",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a PostgreSQL expert.\\n\\nSchema:\\nmedicines(id, name, company, expiry_date, stock_left, price, created_at)\\n\\nRules:\\n- ONLY SELECT queries\\n- NEVER invent tables or columns\\n- Use COUNT(*) for counting rows\\n- Always use aliases like total_medicines, total_stock\\n- If not possible: SELECT 'NO_DATA' AS result;\\n- No markdown, no explanation\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Question: {{$json.question}}\"\n    }\n  ],\n  \"max_tokens\": 300,\n  \"temperature\": 0\n}",
+        "options": {}
+      },
+      "id": "04d17455-c27e-4616-9aca-d71f09434bd9",
+      "name": "Groq: QA SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        288
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2v5VQZ8KJ8DUVScE",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const groqResponse = $input.first().json;\nconst raw = groqResponse.choices?.[0]?.message?.content || '';\nlet sql = raw.replace(/```sql/gi, '').replace(/```/g, '').trim();\n\n// Block destructive statements\nconst forbidden = /\\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE|GRANT|REVOKE)\\b/i;\nif (forbidden.test(sql)) {\n  throw new Error('Blocked: destructive SQL detected');\n}\n\nif (!sql.toLowerCase().startsWith('select')) {\n  throw new Error('Only SELECT queries are allowed. Got: ' + sql.substring(0, 80));\n}\n\nconst parseNode = $('Parse & Classify Input').first().json;\n\nreturn [{\n  json: {\n    sql,\n    question: parseNode.question,\n    is_report: false,\n    timestamp: parseNode.timestamp\n  }\n}];"
+      },
+      "id": "3dc378c6-c357-4cf1-9b8b-7d027662139a",
+      "name": "Clean QA SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "id": "77586415-c1f4-44af-80ad-13d4df81a52d",
+      "name": "DB: Report Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        656,
+        0
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "3tkBmUdWe7Ydc7g4",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.sql }}",
+        "options": {}
+      },
+      "id": "61d959c8-4742-41ac-a4de-254f502790b8",
+      "name": "DB: QA Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        448,
+        288
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "3tkBmUdWe7Ydc7g4",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst meta = $('Clean Report SQL').first().json;\n\nconst now = new Date();\nconst dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });\nconst timeStr = now.toLocaleTimeString('en-US');\n\nlet content = '';\n\ncontent += '         PHARMACY DATABASE REPORT          \\n';\n\ncontent += `Date       : ${dateStr}\\n`;\ncontent += `Time       : ${timeStr}\\n`;\ncontent += `Question   : ${meta.question}\\n`;\ncontent += `Report Type: ${meta.report_type || 'general'}\\n`;\ncontent += `Total Rows : ${rows.length}\\n`;\n\n\nif (rows.length === 0) {\n  content += 'No data found for this report period.\\n';\n} else {\n  const cols = Object.keys(rows[0]);\n  \n  // Column widths\n  const widths = {};\n  cols.forEach(c => {\n    widths[c] = c.length;\n    rows.forEach(r => {\n      const val = r[c] === null || r[c] === undefined ? 'N/A' : String(r[c]);\n      if (val.length > widths[c]) widths[c] = val.length;\n    });\n  });\n\n  // Header row\n  const headerLine = cols.map(c => c.toUpperCase().padEnd(widths[c])).join('  |  ');\n  const dividerLine = cols.map(c => '-'.repeat(widths[c])).join('--+--');\n  content += headerLine + '\\n';\n  content += dividerLine + '\\n';\n\n  // Data rows\n  rows.slice(0, 500).forEach((r, i) => {\n    const line = cols.map(c => {\n      let val = r[c];\n      if (val === null || val === undefined) return 'N/A'.padEnd(widths[c]);\n      if (typeof val === 'string' && val.match(/^\\d{4}-/)) {\n        val = new Date(val).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });\n      }\n      return String(val).padEnd(widths[c]);\n    }).join('  |  ');\n    content += line + '\\n';\n  });\n\n  if (rows.length > 500) {\n    content += `\\n... ${rows.length - 500} more rows not shown.\\n`;\n  }\n}\n\n\ncontent += '              END OF REPORT               \\n';\n\n\nconst filename = `pharmacy_report_${meta.report_type || 'general'}_${Date.now()}.txt`;\n\nreturn [{\n  json: {\n    success: true,\n    type: 'report',\n    report_type: meta.report_type,\n    question: meta.question,\n    filename,\n    content,\n    row_count: rows.length,\n    sql_used: meta.sql,\n    timestamp: meta.timestamp\n  }\n}];"
+      },
+      "id": "15c7cf98-5241-4c4d-82d4-2e7da708e755",
+      "name": "Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all().map(i => i.json);\nconst meta = $('Clean QA SQL').first().json;\n\nif (!rows || rows.length === 0) {\n  return [{\n    json: {\n      success: true,\n      type: 'qa',\n      question: meta.question,\n      answer: 'No results found for your question.',\n      row_count: 0,\n      rows: [],\n      sql_used: meta.sql,\n      timestamp: meta.timestamp\n    }\n  }];\n}\n\n// Single value answer (e.g. COUNT)\nif (rows.length === 1 && Object.keys(rows[0]).length === 1) {\n  const key = Object.keys(rows[0])[0];\n  const val = rows[0][key];\n  return [{\n    json: {\n      success: true,\n      type: 'qa',\n      question: meta.question,\n      answer: `**${key}:** ${val}`,\n      row_count: 1,\n      rows: rows,\n      sql_used: meta.sql,\n      timestamp: meta.timestamp\n    }\n  }];\n}\n\nconst cols = Object.keys(rows[0]);\nconst header = cols.join(' | ');\nconst divider = cols.map(() => '---').join(' | ');\nconst dataRows = rows.slice(0, 50).map(r =>\n  cols.map(c => {\n    const val = r[c];\n    if (val === null || val === undefined) return 'N/A';\n    if (val instanceof Date || (typeof val === 'string' && val.match(/^\\d{4}-/))) {\n      return new Date(val).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });\n    }\n    return String(val);\n  }).join(' | ')\n);\n\nconst table = [header, divider, ...dataRows].join('\\n');\nconst note = rows.length > 50 ? `\\n\\n> Showing 50 of ${rows.length} total rows.` : '';\n\nreturn [{\n  json: {\n    success: true,\n    type: 'qa',\n    question: meta.question,\n    answer: table + note,\n    row_count: rows.length,\n    rows: rows,\n    sql_used: meta.sql,\n    timestamp: meta.timestamp\n  }\n}];"
+      },
+      "id": "8072a8fd-311f-4c2b-aab7-5437a807bafa",
+      "name": "Format QA Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        288
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "c72013b7-e0df-4aba-9a70-335c01e3407b",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1264,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $json.rows;\nconst question = $json.question;\n\nif (!rows || rows.length === 0) {\n  return [{ json: { ...$json, answer: \"No data found.\" } }];\n}\n\n// COUNT case\nif (rows.length === 1 && Object.keys(rows[0]).length === 1) {\n  const key = Object.keys(rows[0])[0];\n  const value = rows[0][key];\n\n  return [{\n    json: {\n      ...$json,\n      answer: `There are ${value} records in the database.`\n    }\n  }];\n}\n\n// default table summary\nreturn [{\n  json: {\n    ...$json,\n    answer: `Found ${rows.length} records matching your query.`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        288
+      ],
+      "id": "0b9bd23c-61f3-4e1e-b31f-780627a435fc",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\n\n// Convert text content to base64\nconst base64 = Buffer.from(data.content, 'utf8').toString('base64');\n\nreturn [{\n  json: { ...data },\n  binary: {\n    report: {\n      data: base64,\n      mimeType: 'text/plain',\n      fileName: data.filename,\n      fileExtension: 'txt'\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1088,
+        0
+      ],
+      "id": "1ea4ce3e-754c-4600-ab96-1833293a89b4",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const sql = $input.first().json.sql;\n\nif (!sql || typeof sql !== 'string' || sql.trim().length === 0) {\n  throw new Error('No SQL received from query enforcer');\n}\n\n// Block destructive statements\nconst forbidden = /\\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|CREATE|GRANT|REVOKE)\\b/i;\nif (forbidden.test(sql)) {\n  throw new Error('Blocked: destructive SQL detected');\n}\n\nif (!sql.toLowerCase().trim().startsWith('select')) {\n  throw new Error('Only SELECT queries are allowed. Got: ' + sql.substring(0, 80));\n}\n\nconst parseNode = $('Parse & Classify Input').first().json;\n\nreturn [{\n  json: {\n    sql,\n    question: parseNode.question,\n    report_type: parseNode.report_type,\n    is_report: true,\n    timestamp: parseNode.timestamp\n  }\n}];"
+      },
+      "id": "a65d9971-fa42-4723-9ce2-4827e654e2be",
+      "name": "Clean Report SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nlet sql =\n  item.choices?.[0]?.message?.content ||\n  item.message?.content ||\n  item.text ||\n  item.sql ||\n  '';\n\nif (!sql || typeof sql !== 'string' || sql.trim().length === 0) {\n  throw new Error('Groq returned empty SQL. Check model response.');\n}\n\n// cleanup\nsql = sql.replace(/```sql/gi, '').replace(/```/g, '').trim();\nsql = sql.replace(/;+$/g, '');\nsql = sql.replace(/limit\\s+\\d+/i, '');\n\nif (!sql.toLowerCase().startsWith('select')) {\n  throw new Error('Only SELECT queries are allowed. Got: ' + sql.substring(0, 100));\n}\n\nconst { question, days } = $('Parse & Classify Input').first().json;\nconst q = question.toLowerCase();\n\n// Only force a date-range filter for genuinely expiry-related questions\nconst isExpiryQuestion = q.includes('expir');\n\nif (isExpiryQuestion) {\n  const condition = `expiry_date BETWEEN CURRENT_DATE AND (CURRENT_DATE + INTERVAL '${days || 10} day')`;\n\n  if (sql.toLowerCase().includes('where')) {\n    if (!sql.toLowerCase().includes('expiry_date')) {\n      sql = sql.replace(/where/i, `WHERE ${condition} AND`);\n    }\n  } else {\n    sql += ` WHERE ${condition}`;\n  }\n}\n\nsql += ' LIMIT 500';\n\nreturn [{ json: { sql } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "9c8139b5-b32d-4d6e-813c-54172add9dcd",
+      "name": "query enforcer"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse & Classify Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Classify Input": {
+      "main": [
+        [
+          {
+            "node": "Route: Report or QA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq: Report SQL": {
+      "main": [
+        [
+          {
+            "node": "query enforcer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq: QA SQL": {
+      "main": [
+        [
+          {
+            "node": "Clean QA SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean QA SQL": {
+      "main": [
+        [
+          {
+            "node": "DB: QA Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB: Report Query": {
+      "main": [
+        [
+          {
+            "node": "Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB: QA Query": {
+      "main": [
+        [
+          {
+            "node": "Format QA Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format QA Answer": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Report or QA": {
+      "main": [
+        [
+          {
+            "node": "Groq: Report SQL",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq: QA SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean Report SQL": {
+      "main": [
+        [
+          {
+            "node": "DB: Report Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "query enforcer": {
+      "main": [
+        [
+          {
+            "node": "Clean Report SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "4b017167-a594-4389-af87-0af7e82dce8e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "6bd74d71f5f4a4f63344e7cb665b41fbdace95149e6e9993131d7c7726718c12"
+  },
+  "nodeGroups": [],
+  "id": "OnvTwBHT1jFlpPwm",
+  "tags": []
+}

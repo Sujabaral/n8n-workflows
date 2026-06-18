@@ -1,0 +1,835 @@
+{
+  "name": "EDA — Main Alert Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "alert-ingest",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "34cb376b-7436-4657-b326-49ecc9840e16",
+      "name": "Webhook — Receive Alert",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        160,
+        400
+      ],
+      "webhookId": "eda-alert-ingest"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as dup_count \nFROM incidents \nWHERE alert_hash = $1 \nAND created_at > NOW() - INTERVAL '5 minutes'",
+        "options": {
+          "queryReplacement": "=={{ [$('Code in JavaScript').item.json.alert_hash] }}"
+        }
+      },
+      "id": "1b4d65bd-c532-4a96-afeb-6ab76bc41251",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        816,
+        400
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "n7n6yg8Xi0rQlqov",
+          "name": "Postgres account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond_dup",
+              "leftValue": "={{ $json.dup_count.toNumber() }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1d05049-218f-4111-b447-20a1b5197cad",
+      "name": "IF — Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"deduplicated\", \"message\": \"Duplicate suppressed within 5 minute window\"}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "9020b108-951d-4ded-8f49-f9a0e45386f9",
+      "name": "Respond — Deduplicated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1248,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama-3.3-70b-versatile\",\n  \"temperature\": 0,\n  \"max_tokens\": 150,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You classify alerts for an emergency detection system. Respond ONLY with this exact JSON format, no other text:\\n{\\\"severity\\\": \\\"P1\\\", \\\"confidence\\\": \\\"high\\\", \\\"reason\\\": \\\"one sentence explanation\\\"}\\n\\nSeverity rules:\\nP1 = system down, crash, OOM, data loss, complete outage, security breach\\nP2 = major degradation, high error rate, key feature broken, repeated timeouts\\nP3 = warnings, elevated latency, non-critical errors, approaching limits\\nP4 = informational, deployments, routine events, health checks passing\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Source: {{ $('Code in JavaScript').item.json.source }}\\nAlert: {{ $('Code in JavaScript').item.json.message }}\"\n    }\n  ]\n}",
+        "options": {
+          "timeout": 8000
+        }
+      },
+      "id": "a106589e-00cd-4fb0-91a1-e1d5d4c036ee",
+      "name": "Groq — Classify Severity",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1248,
+        544
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "voxW4T71sZOBOKUU",
+          "name": "Header Auth account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign_severity",
+              "name": "severity",
+              "value": "={{ JSON.parse($json.choices[0].message.content)?.severity ?? 'P3' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_confidence",
+              "name": "confidence",
+              "value": "={{ JSON.parse($json.choices[0].message.content)?.confidence ?? 'medium' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_reason",
+              "name": "ai_reason",
+              "value": "={{ JSON.parse($json.choices[0].message.content)?.reason ?? '' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_src",
+              "name": "source",
+              "value": "={{ $('Normalize Payload').item.json.source }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_msg",
+              "name": "message",
+              "value": "={{ $('Normalize Payload').item.json.message }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_ahash",
+              "name": "alert_hash",
+              "value": "={{ $('Code in JavaScript').item.json.alert_hash }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_rawp",
+              "name": "raw_payload",
+              "value": "={{ $('Normalize Payload').item.json.raw_payload }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fbdb586e-b6e8-44a5-ab28-f195794eaf7b",
+      "name": "Extract AI Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1472,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO incidents (severity, confidence, ai_reason, source, message, alert_hash, raw_payload)\nVALUES (\n  '{{ $json.severity }}',\n  '{{ $json.confidence }}',\n  '{{ $json.ai_reason }}',\n  '{{ $json.source }}',\n  '{{ $json.message }}',\n  '{{ $json.alert_hash }}',\n  '{{ $json.raw_payload }}'\n)\nON CONFLICT (alert_hash) DO UPDATE SET severity = EXCLUDED.severity\nRETURNING id, severity;",
+        "options": {}
+      },
+      "id": "b83b61a9-804e-42ad-a160-4f5f9098f8ba",
+      "name": "Save to Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1696,
+        544
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "n7n6yg8Xi0rQlqov",
+          "name": "Postgres account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "assign_source",
+              "name": "source",
+              "value": "={{ $json.body?.source ?? $json.body?.project ?? $json.body?.monitor ?? $json.source ?? 'unknown' }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_message",
+              "name": "message",
+              "value": "={{ $json.body?.message ?? $json.body?.description ?? $json.body?.error ?? $json.body?.event ?? $json.message ?? JSON.stringify($json.body ?? $json) }}",
+              "type": "string"
+            },
+            {
+              "id": "assign_raw",
+              "name": "raw_payload",
+              "value": "={{ JSON.stringify($json.body ?? $json) }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "8522b294-1c81-464c-8a97-1b3f54cc22cf",
+      "name": "Normalize Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        384,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "",
+        "text": "=🟠 *P1 OP2 WARNING ALERT*\n\n*Source:* {{ $('Extract AI Result').item.json.source }}\n*Message:* {{ $('Extract AI Result').item.json.message }}\n*Reason:* {{ $('Extract AI Result').item.json.ai_reason }}\n*Incident ID:* #{{ $('Save to Postgres').item.json.id }}\n\n⚠️ *Status:* HIGH risk detected (P1 level)\n🔧 *Action:* Investigation required soon\n⏱️ *Priority:* Medium-High system impact possible\n\nThis alert was generated automatically by the monitoring system.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "0e487333-2b98-490d-a254-397eeeb1cbf2",
+      "name": "Telegram — P1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2224,
+        656
+      ],
+      "webhookId": "34eadefb-3b66-4f9b-bfa2-7ec45df6e776",
+      "credentials": {
+        "telegramApi": {
+          "id": "cV8aAdvRsI3nZND0",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "=8686572176",
+        "text": "=🟠 *P2 WARNING ALERT*\n\n*Source:* {{ $('Extract AI Result').item.json.source }}\n*Message:* {{ $('Extract AI Result').item.json.message }}\n*Reason:* {{ $('Extract AI Result').item.json.ai_reason }}\n*Incident ID:* #{{ $('Save to Postgres').item.json.id }}\n\n⚠️ *Status:* Elevated risk detected (P2 level)\n🔧 *Action:* Investigation required soon\n⏱️ *Priority:* Medium-High system impact possible\n\nThis alert was generated automatically by the monitoring system.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "de105a6a-904a-487a-a0e2-f1e47e5578c5",
+      "name": "Telegram — P2",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2208,
+        880
+      ],
+      "webhookId": "fe434225-ad8a-4e6e-b8aa-0e9a366698f2",
+      "credentials": {
+        "telegramApi": {
+          "id": "cV8aAdvRsI3nZND0",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "=",
+        "text": "=🟠 *P3 WARNING ALERT*\n\n*Source:* {{ $('Extract AI Result').item.json.source }}\n*Message:* {{ $('Extract AI Result').item.json.message }}\n*Reason:* {{ $('Extract AI Result').item.json.ai_reason }}\n*Incident ID:* #{{ $('Save to Postgres').item.json.id }}\n\n⚠️ *Status:* Medium risk detected (P3 level)\n🔧 *Action:* Investigation required soon\n⏱️ *Priority:* Medium-High system impact possible\n\nThis alert was generated automatically by the monitoring system.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "606b8dbb-8741-4ea6-a912-213c4cbdc273",
+      "name": "Telegram — P3",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2176,
+        1152
+      ],
+      "webhookId": "f7cda11b-4ca1-49ee-9e83-fdf81f603db3",
+      "credentials": {
+        "telegramApi": {
+          "id": "cV8aAdvRsI3nZND0",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "=",
+        "text": "=🟠 *P4 WARNING ALERT*\n\n*Source:* {{ $('Extract AI Result').item.json.source }}\n*Message:* {{ $('Extract AI Result').item.json.message }}\n*Reason:* {{ $('Extract AI Result').item.json.ai_reason }}\n*Incident ID:* #{{ $('Save to Postgres').item.json.id }}\n\n⚠️ *Status:* P4 \n🔧 *Action:* Investigation required later\n⏱️ *Priority:* Low system impact possible\n\nThis alert was generated automatically by the monitoring system.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "bd804189-1f68-43c0-8278-650abc7bbef2",
+      "name": "Telegram — P4",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2160,
+        1440
+      ],
+      "webhookId": "2d242acf-5869-4578-b2b0-3daedc7c63ff",
+      "credentials": {
+        "telegramApi": {
+          "id": "cV8aAdvRsI3nZND0",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "",
+        "toEmail": "=",
+        "subject": "==[P1 CRITICAL OUTAGE] {{ $('Extract AI Result').item.json.source }} — {{ $('Extract AI Result').item.json.message.slice(0,50) }}",
+        "emailFormat": "text",
+        "text": "=🔴 P1 CRITICAL OUTAGE ALERT\n\nSource: {{ $('Extract AI Result').item.json.source }}\nMessage: {{ $('Extract AI Result').item.json.message }}\nReason: {{ $('Extract AI Result').item.json.ai_reason }}\nIncident ID: #{{ $('Save to Postgres').item.json.id }}\n\n🚨 IMMEDIATE ACTION REQUIRED\nThis is a P1 (Critical) severity incident.\n\nSystem is experiencing a major outage or severe failure affecting production services.\nEscalate immediately. On-call response required.\n\n—\nAutomated Alert System (n8n)",
+        "options": {}
+      },
+      "id": "dddd6ce8-0fba-473d-b39b-a4f100f4f7a5",
+      "name": "Email — P1",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2432,
+        832
+      ],
+      "webhookId": "18b10c9a-2c39-43c7-83e8-671fc22a0a19",
+      "credentials": {
+        "smtp": {
+          "id": "ZMpHWgWFZzRnJlMV",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "",
+        "toEmail": "",
+        "subject": "==[P2 MAJOR] {{ $('Extract AI Result').item.json.source }} — {{ $('Extract AI Result').item.json.message.slice(0,50) }}",
+        "emailFormat": "text",
+        "text": "=🟠 P2 MAJOR ALERT\n\nSource: {{ $('Extract AI Result').item.json.source }}\nMessage: {{ $('Extract AI Result').item.json.message }}\nReason: {{ $('Extract AI Result').item.json.ai_reason }}\nIncident ID: #{{ $('Save to Postgres').item.json.id }}\n\n⚠️ Action Required Soon\nThis is a P2 (Major) severity alert.\n\nSystem detected abnormal behavior that may require investigation.\nPlease check logs and system health immediately.\n\n—\nAutomated Alert System (n8n)",
+        "options": {}
+      },
+      "id": "038a1852-182d-43e2-98b5-329a609e6619",
+      "name": "Email — P2",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2416,
+        1152
+      ],
+      "webhookId": "0206b57d-e422-4562-aeff-d75ce33ee682",
+      "credentials": {
+        "smtp": {
+          "id": "ZMpHWgWFZzRnJlMV",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/''' ",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "twilioApi",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "To",
+              "value": ""
+            },
+            {
+              "name": "From",
+              "value": ""
+            },
+            {
+              "name": "Url",
+              "value": "https://handler.twilio.com/twiml/Exxx"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "73c4d0f9-1968-4e8c-b5ea-a1a19515d2fe",
+      "name": "Twilio Call — P1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2736,
+        1056
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "voxW4T71sZOBOKUU",
+          "name": "Header Auth account 5"
+        },
+        "twilioApi": {
+          "id": "yH4hjKTAF9jxJcRi",
+          "name": "Twilio account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO escalation_log (incident_id, action, channel, notes)\nVALUES (\n  '{{ $(\"Save to Postgres\").item.json.id }}',\n  'notified',\n  'telegram+email',\n  'Initial notification sent for {{ $(\"Extract AI Result\").item.json.severity }}'\n);",
+        "options": {}
+      },
+      "id": "1dce480b-c6cf-45e2-8532-d9a461911499",
+      "name": "Log to Escalation Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2848,
+        1504
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "n7n6yg8Xi0rQlqov",
+          "name": "Postgres account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'processed', incident_id: $('Save to Postgres').item.json.id, severity: $('Extract AI Result').item.json.severity, source: $('Extract AI Result').item.json.source }) }}",
+        "options": {
+          "responseCode": 201
+        }
+      },
+      "id": "c2ce0206-d68c-4c25-8a3b-4fdd16c34ed9",
+      "name": "Respond — Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        3216,
+        1504
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\n\nconst source = body.source ?? body.project ?? body.monitor ?? 'unknown';\n\nconst message = body.message ?? body.description ?? body.error ?? body.event ?? JSON.stringify(body);\n\nconst raw_payload = JSON.stringify(body);\n\nfunction simpleHash(str) {\n  let hash = 0;\n  for (let i = 0; i < str.length; i++) {\n    const char = str.charCodeAt(i);\n    hash = (hash << 5) - hash + char;\n    hash = hash & hash;\n  }\n  return Math.abs(hash).toString(16);\n}\n\nconst alert_hash = simpleHash(source + '|' + message);\n\nreturn [\n  {\n    json: {\n      source,\n      message,\n      raw_payload,\n      alert_hash\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        400
+      ],
+      "id": "1cbdb1fd-6939-4115-a35d-08cdda688060",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "c3953c4c-10d8-40ad-a8f1-32a69063d3cd",
+                    "leftValue": "={{ $('Extract AI Result').item.json.severity }}",
+                    "rightValue": "P1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "381fc0e6-27fa-4e11-9354-a18d45cc7b80",
+                    "leftValue": "={{ $('Extract AI Result').item.json.severity }}",
+                    "rightValue": "P2",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "0a5093fb-5a5d-49c6-8324-e91f0cbda1eb",
+                    "leftValue": "={{ $('Extract AI Result').item.json.severity }}",
+                    "rightValue": "P3",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "7e251ddc-33ee-420d-8a25-157e4eea2e52",
+                    "leftValue": "={{ $('Extract AI Result').item.json.severity }}",
+                    "rightValue": "P4",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1936,
+        512
+      ],
+      "id": "36aa80d0-5bf4-4acb-a448-5937d795eeb0",
+      "name": "Switch",
+      "alwaysOutputData": false
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook — Receive Alert": {
+      "main": [
+        [
+          {
+            "node": "Normalize Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "IF — Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF — Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond — Deduplicated",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Groq — Classify Severity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq — Classify Severity": {
+      "main": [
+        [
+          {
+            "node": "Extract AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract AI Result": {
+      "main": [
+        [
+          {
+            "node": "Save to Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Postgres": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Payload": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram — P1": {
+      "main": [
+        [
+          {
+            "node": "Email — P1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram — P2": {
+      "main": [
+        [
+          {
+            "node": "Email — P2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram — P3": {
+      "main": [
+        [
+          {
+            "node": "Log to Escalation Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram — P4": {
+      "main": [
+        [
+          {
+            "node": "Log to Escalation Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email — P1": {
+      "main": [
+        [
+          {
+            "node": "Twilio Call — P1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email — P2": {
+      "main": [
+        [
+          {
+            "node": "Log to Escalation Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twilio Call — P1": {
+      "main": [
+        [
+          {
+            "node": "Log to Escalation Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Escalation Log": {
+      "main": [
+        [
+          {
+            "node": "Respond — Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Telegram — P1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram — P2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram — P3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Telegram — P4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "531f0da5-aad0-4f4c-a811-6610c3920d80",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "6bd74d71f5f4a4f63344e7cb665b41fbdace95149e6e9993131d7c7726718c12"
+  },
+  "nodeGroups": [],
+  "id": "nSHjfPGivIAWs5vE",
+  "tags": [
+    {
+      "updatedAt": "2026-06-15T05:26:48.644Z",
+      "createdAt": "2026-06-15T05:26:48.644Z",
+      "id": "YcVXiMNA4qYXqnQi",
+      "name": "EDA"
+    }
+  ]
+}
